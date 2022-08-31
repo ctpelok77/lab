@@ -484,3 +484,283 @@ class TetralithEnvironment(SlurmEnvironment):
     def is_present(cls):
         node = platform.node()
         return re.match(r"tetralith\d+\.nsc\.liu\.se|n\d+", node)
+
+class LSFEnvironment(Environment):
+    """Abstract base class for LSF environments.
+
+
+    .. note::
+
+        If the steps are run by LSF, this class writes job files to
+        the directory ``<exppath>-grid-steps`` and makes them depend on
+        one another. Please inspect the \\*.log and \\*.err files in
+        this directory if something goes wrong. Since the job files call
+        the experiment script during execution, it mustn't be changed
+        during the experiment.
+
+    If *email* is provided and the steps run on the grid, a message will
+    be sent when the last experiment step finishes.
+
+
+    *time_limit_per_task* sets the wall-clock time limit for each Slurm task.
+    The BaselSlurmEnvironment subclass uses a default of "0", i.e., no limit.
+    (Note that there may still be an external limit set in slurm.conf.)
+    The TetralithEnvironment class uses a default of "24:00:00", i.e., 24
+    hours. This is because in certain situations, the scheduler prefers to
+    schedule tasks shorter than 24 hours.
+
+    
+    Use *export* to specify a list of environment variables that
+    should be exported from the login node to the compute nodes
+    (default: ["PATH"]).
+
+    You can alter the environment in which the experiment runs with
+    the *setup* argument. If given, it must be a string of Bash
+    commands. Example::
+
+        # Load Singularity module.
+        setup="module load Singularity/2.6.1 2> /dev/null"
+
+    Slurm limits the number of job array tasks. You must set the
+    appropriate value for your cluster in the *MAX_TASKS* class
+    variable. Lab groups `ceil(runs/MAX_TASKS)` runs in one array
+    task.
+
+    See :py:class:`~lab.environments.Environment` for inherited
+    parameters.
+
+    """
+
+    # Must be overridden in derived classes.
+    JOB_HEADER_TEMPLATE_FILE = None
+    RUN_JOB_BODY_TEMPLATE_FILE = None
+    STEP_JOB_BODY_TEMPLATE_FILE = None
+    MAX_TASKS: int = None  # Value between 1 and MaxArraySize-1 (from slurm.conf).
+    DEFAULT_QUEUE = None
+    DEFAULT_MEMORY_PER_CPU = None
+
+    # Can be overridden in derived classes.
+    DEFAULT_TIME_LIMIT_PER_TASK = "0"  # No limit.
+    DEFAULT_EXPORT = ["PATH"]
+    DEFAULT_SETUP = ""
+    NICE_VALUE = 0
+    JOB_HEADER_TEMPLATE_FILE = "lsf-job-header"
+    RUN_JOB_BODY_TEMPLATE_FILE = "slurm-run-job-body"
+    STEP_JOB_BODY_TEMPLATE_FILE = "slurm-step-job-body"
+
+    def __init__(
+        self,
+        email=None,
+        extra_options=None,
+        queue=None,
+        time_limit_per_task=None,
+        memory_per_cpu=None,
+        cpus_per_task=1,
+        export=None,
+        setup=None,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+
+        self.email = email
+        self.extra_options = extra_options or "## (not used)"
+
+        if queue is None:
+            queue = self.DEFAULT_QUEUE
+        if time_limit_per_task is None:
+            time_limit_per_task = self.DEFAULT_TIME_LIMIT_PER_TASK
+        if memory_per_cpu is None:
+            memory_per_cpu = self.DEFAULT_MEMORY_PER_CPU
+        if export is None:
+            export = self.DEFAULT_EXPORT
+        if setup is None:
+            setup = self.DEFAULT_SETUP
+
+        self.queue = queue
+        self.time_limit_per_task = time_limit_per_task
+        self.memory_per_cpu = memory_per_cpu
+        self.cpus_per_task = cpus_per_task
+        self.export = export
+        self.setup = setup
+
+    @staticmethod
+    def _get_memory_in_kb(limit):
+        match = re.match(r"^(\d+)(k|m|g)?$", limit, flags=re.I)
+        if not match:
+            logging.critical(f"malformed memory_per_cpu parameter: {limit}")
+        memory = int(match.group(1))
+        suffix = match.group(2)
+        if suffix is not None:
+            suffix = suffix.lower()
+        if suffix == "k":
+            pass
+        elif suffix is None or suffix == "m":
+            memory *= 1024
+        elif suffix == "g":
+            memory *= 1024 * 1024
+        return memory
+
+    def start_runs(self):
+        # The queue will start the experiment by itself.
+        pass
+
+    def _get_job_name(self, step):
+        return (
+            f"{_get_job_prefix(self.exp.name)}"
+            f"{self.exp.steps.index(step) + 1:02d}-{step.name}"
+        )
+
+    def _get_num_runs_per_task(self):
+        return math.ceil(len(self.exp.runs) / self.MAX_TASKS)
+
+    def _get_num_tasks(self, step):
+        if is_run_step(step):
+            num_runs = len(self.exp.runs)
+            num_tasks = math.ceil(num_runs / self._get_num_runs_per_task())
+        else:
+            num_tasks = 1
+        return num_tasks
+
+    def _get_job_header(self, step, is_last):
+        job_params = self._get_job_params(step, is_last)
+        return tools.fill_template(self.JOB_HEADER_TEMPLATE_FILE, **job_params)
+
+    def _get_run_job_body(self, run_step):
+        num_runs = len(self.exp.runs)
+        num_tasks = self._get_num_tasks(run_step)
+        logging.info(f"Grouping {num_runs} runs into {num_tasks} Slurm tasks.")
+        return tools.fill_template(
+            self.RUN_JOB_BODY_TEMPLATE_FILE,
+            exp_path="../" + self.exp.name,
+            num_runs=num_runs,
+            python=tools.get_python_executable(),
+            runs_per_task=self._get_num_runs_per_task(),
+            task_order=" ".join(str(i) for i in self._get_task_order(num_tasks)),
+        )
+
+    def _get_step_job_body(self, step):
+        return tools.fill_template(
+            self.STEP_JOB_BODY_TEMPLATE_FILE,
+            cwd=os.getcwd(),
+            python=tools.get_python_executable(),
+            script=sys.argv[0],
+            step_name=step.name,
+        )
+
+    def _get_job_body(self, step):
+        if is_run_step(step):
+            return self._get_run_job_body(step)
+        return self._get_step_job_body(step)
+
+    def _get_job(self, step, is_last):
+        return f"{self._get_job_header(step, is_last)}\n\n{self._get_job_body(step)}"
+
+    def write_main_script(self):
+        # The main script is written by the run_steps() method.
+        pass
+
+    def run_steps(self, steps):
+        """
+        We can't submit jobs from within the grid, so we submit them
+        all at once with dependencies. We also can't rewrite the job
+        files after they have been submitted.
+        """
+        self.exp.build(write_to_disk=False)
+
+        # Prepare job dir.
+        job_dir = self.exp.path + "-grid-steps"
+        if os.path.exists(job_dir):
+            tools.confirm_or_abort(
+                f'The path "{job_dir}" already exists, so the experiment has '
+                f"already been submitted. Are you sure you want to "
+                f"delete the grid-steps and submit it again?"
+            )
+            tools.remove_path(job_dir)
+
+        # Overwrite exp dir if it exists.
+        if any(is_build_step(step) for step in steps):
+            self.exp._remove_experiment_dir()
+
+        # Remove eval dir if it exists.
+        if os.path.exists(self.exp.eval_dir):
+            tools.confirm_or_abort(
+                f'The evaluation directory "{self.exp.eval_dir}" already exists. '
+                f"Do you want to remove it?"
+            )
+            tools.remove_path(self.exp.eval_dir)
+
+        # Create job dir only when we need it.
+        tools.makedirs(job_dir)
+
+        prev_job_id = None
+        for step in steps:
+            job_name = self._get_job_name(step)
+            job_file = os.path.join(job_dir, job_name)
+            job_content = self._get_job(step, is_last=(step == steps[-1]))
+            tools.write_file(job_file, job_content)
+            prev_job_id = self._submit_job(
+                job_name, job_file, job_dir, dependency=prev_job_id
+            )
+
+    def _get_job_params(self, step, is_last):
+        job_params = {
+            "errfile": "driver.err",
+            "extra_options": self.extra_options,
+            "logfile": "driver.log",
+            "name": self._get_job_name(step),
+            "num_tasks": self._get_num_tasks(step),
+        }
+
+        # Let all tasks write into the same two files. We could use %a
+        # (which is replaced by the array ID) to prevent mangled up logs,
+        # but we don't want so many files.
+        job_params["logfile"] = "lsf.log"
+        job_params["errfile"] = "lsf.err"
+
+        job_params["queue"] = self.queue
+        job_params["time_limit_per_task"] = self.time_limit_per_task
+        job_params["memory_per_cpu"] = self.memory_per_cpu
+        job_params["cpus_per_task"] = self.cpus_per_task
+        memory_per_cpu_kb = LSFEnvironment._get_memory_in_kb(self.memory_per_cpu)
+        job_params["soft_memory_limit"] = int(
+            self.cpus_per_task * memory_per_cpu_kb * 0.98
+        )
+        job_params["nice"] = self.NICE_VALUE if is_run_step(step) else 0
+        job_params["environment_setup"] = self.setup
+
+        if is_last and self.email:
+            job_params["mailtype"] = "END,FAIL,REQUEUE,STAGE_OUT"
+            job_params["mailuser"] = self.email
+        else:
+            job_params["mailtype"] = "NONE"
+            job_params["mailuser"] = ""
+
+        return job_params
+
+    def _submit_job(self, job_name, job_file, job_dir, dependency=None):
+        submit = ["bsub"]
+        if self.export:
+            submit += ["-env", ",".join(self.export)]
+        # if dependency:
+        #     submit.extend(["-d", "afterany:" + dependency, "--kill-on-invalid-dep=yes"])
+        submit.extend(["<", job_file])
+        logging.info(f"Executing {' '.join(submit)}")
+        # out = subprocess.check_output(submit, cwd=job_dir).decode()
+        out = subprocess.check_output(['cat', job_file], cwd=job_dir).decode()
+        logging.info(f"Output: {out.strip()}")
+        match = re.match(r"Submitted batch job (\d*)", out)
+        # assert match, f"Submitting job with bsub failed: '{out}'"
+        return match.group(1)
+
+
+
+class IBMLSFEnvironment(LSFEnvironment):
+    """Environment for IBM Research AI Planning group."""
+
+    DEFAULT_QUEUE = "normal"
+    DEFAULT_MEMORY_PER_CPU = "3872M"
+    MAX_TASKS = 3000 - 1  
+    NICE_VALUE = 5000
+
+
+

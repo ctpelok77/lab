@@ -1,0 +1,19 @@
+#! /bin/bash -l
+### Set name 
+#BSUB -J %(name)[1:%(num_tasks)]s
+### Redirect stdout and stderr.
+#BSUB -o %(logfile)s
+#BSUB -e %(errfile)s
+### Set queue.
+#BSUB -q %(queue)s
+### Set cpu time limit per task.
+#BSUB -c %(time_limit_per_task)s
+### Set memory limit.
+#BSUB -M %(memory_per_cpu)s
+### Extra options.
+%(extra_options)s
+
+%(environment_setup)s
+
+# Set a soft memory limit to guard against the cgroup mechanism failing (see SlurmEnvironment docs).
+ulimit -Sv %(soft_memory_limit)d
