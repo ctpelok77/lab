@@ -746,7 +746,7 @@ class LSFEnvironment(Environment):
         # submit.extend(["<", job_file])
         logging.info(f"Executing {' '.join(submit)} in folder {job_dir}")
         out = subprocess.check_output(submit, cwd=job_dir, stdin=open(job_file, 'r')).decode()
-        match = re.match(r"Submitted batch job (\d*)", out)
+        match = re.match(r"Job <(\d*)> is submitted", out)
         # assert match, f"Submitting job with bsub failed: '{out}'"
         return match.group(1)
 
