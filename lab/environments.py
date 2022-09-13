@@ -744,10 +744,8 @@ class LSFEnvironment(Environment):
         # if dependency:
         #     submit.extend(["-d", "afterany:" + dependency, "--kill-on-invalid-dep=yes"])
         submit.extend(["<", job_file])
-        logging.info(f"Executing {' '.join(submit)}")
-        # out = subprocess.check_output(submit, cwd=job_dir).decode()
-        out = subprocess.check_output(['cat', job_file], cwd=job_dir).decode()
-        logging.info(f"Output: {out.strip()}")
+        logging.info(f"Executing {' '.join(submit)} in folder {job_dir}")
+        out = subprocess.check_output(submit, cwd=job_dir).decode()
         match = re.match(r"Submitted batch job (\d*)", out)
         # assert match, f"Submitting job with bsub failed: '{out}'"
         return match.group(1)
