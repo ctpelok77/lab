@@ -545,7 +545,7 @@ class LSFEnvironment(Environment):
     DEFAULT_SETUP = ""
     NICE_VALUE = 0
     JOB_HEADER_TEMPLATE_FILE = "lsf-job-header"
-    RUN_JOB_BODY_TEMPLATE_FILE = "slurm-run-job-body"
+    RUN_JOB_BODY_TEMPLATE_FILE = "lsf-run-job-body"
     STEP_JOB_BODY_TEMPLATE_FILE = "slurm-step-job-body"
 
     def __init__(
