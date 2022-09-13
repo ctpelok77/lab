@@ -1,6 +1,6 @@
 #! /bin/bash -l
 ### Set name 
-#BSUB -J %(name)[1-%(num_tasks)]s
+#BSUB -J %(name)s[1-%(num_tasks)d]
 ### Redirect stdout and stderr.
 #BSUB -o %(logfile)s
 #BSUB -e %(errfile)s
